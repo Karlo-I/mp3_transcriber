@@ -2,6 +2,8 @@
 
 A lightweight, 100% offline Flask web application that transcribes audio files into text using the open-source Whisper model. This tool is specifically optimized for Apple Silicon (M1/M2/M3) Macs, utilizing the Metal Performance Shaders (MPS) backend for blazing-fast local processing. The front-end is very basic, which is enough for my use-case, but feel free to pull-request to improve on it as you wish. 
 
+[![Architecture diagram of karlo-i/mp3_transcriber](https://gitdiagram.com/karlo-i/mp3_transcriber/diagram.png)](https://gitdiagram.com/karlo-i/mp3_transcriber?utm_source=readme&utm_medium=picture)
+
 ## ✨ Features
 
 *   **100% Offline & Private:** No audio data ever leaves your computer.
