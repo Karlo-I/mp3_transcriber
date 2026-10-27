@@ -3,13 +3,14 @@ import uuid
 import subprocess
 import whisper
 import torch
+import yt_dlp
 from flask import Flask, request, render_template
 from werkzeug.utils import secure_filename
 from urllib.parse import quote
 
 app = Flask(__name__)
 
-# Create a temporary folder to hold uploaded files during processing
+# Create a temporary folder to hold uploaded/downloaded files
 UPLOAD_FOLDER = 'temp_uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
@@ -25,18 +26,54 @@ def index():
 
 @app.route('/transcribe', methods=['POST'])
 def transcribe():
-    # 1. Handle the uploaded file
-    if 'audio_file' not in request.files:
-        return "Error: No file part in the request."
+    youtube_url = request.form.get('youtube_url', '').strip()
+    file = request.files.get('audio_file')
     
-    file = request.files['audio_file']
-    if file.filename == '':
-        return "Error: No file selected."
+    temp_filepath = os.path.join(UPLOAD_FOLDER, f"temp_{uuid.uuid4()}")
+    actual_audio_path = None
+
+    # 1. Determine the source of the audio
+    if youtube_url: # This works on any video-sharing platform as well
+        print(f"Downloading audio from YouTube...")
+        
+        # This function updates the terminal with download progress
+        def progress_hook(d):
+            if d['status'] == 'downloading':
+                # \r moves the cursor to the start of the line to update it
+                percent = d.get('_percent_str', 'Unknown')
+                speed = d.get('_speed_str', 'Unknown')
+                print(f"\rDownloading: {percent} | Speed: {speed}", end='', flush=True)
+            elif d['status'] == 'finished':
+                print("\nDownload complete! Extracting audio...")
+
+        try:
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': temp_filepath, 
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
+                'progress_hooks': [progress_hook], # <--- This adds the progress bar!
+                'no_warnings': True # Hides the Python 3.10 warning
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([youtube_url])
+            actual_audio_path = temp_filepath + '.mp3'
+        except Exception as e:
+            return f"Error downloading YouTube video: {str(e)}"
+            
+    elif file and file.filename != '':
+        # Handle standard file upload
+        temp_filename = f"{temp_filepath}_{secure_filename(file.filename)}"
+        actual_audio_path = os.path.join(UPLOAD_FOLDER, temp_filename)
+        file.save(actual_audio_path)
+    else:
+        return "Error: Please provide either a YouTube URL or upload an audio file."
 
     # 2. Handle the save directory
     save_dir = request.form.get('save_path', '').strip()
-    
-    # Default to Desktop if left blank
     if not save_dir:
         save_dir = os.path.expanduser("~/Desktop")
     else:
@@ -45,19 +82,14 @@ def transcribe():
     if not os.path.isdir(save_dir):
         return f"Error: The folder '{save_dir}' does not exist. Please check the path."
 
-    # 3. Save the uploaded file temporarily
-    temp_filename = f"temp_{uuid.uuid4()}_{secure_filename(file.filename)}"
-    temp_filepath = os.path.join(UPLOAD_FOLDER, temp_filename)
-    file.save(temp_filepath)
-
     try:
-        # 4. Transcribe the audio
-        print(f"Transcribing {file.filename}... (Check terminal for progress)")
-        result = model.transcribe(temp_filepath, verbose=True) 
+        # 3. Transcribe the audio
+        print(f"Transcribing... (Check terminal for progress)")
+        result = model.transcribe(actual_audio_path, verbose=True) 
 
-        # 5. Save the text file to the user's chosen directory with timestamps
-        original_name = os.path.splitext(secure_filename(file.filename))[0]
-        output_filename = f"{original_name}_transcript.txt"
+        # 4. Save the text file with timestamps
+        source_name = "youtube_transcript" if youtube_url else os.path.splitext(secure_filename(file.filename))[0]
+        output_filename = f"{source_name}_transcript.txt"
         output_filepath = os.path.join(save_dir, output_filename)
 
         with open(output_filepath, "w", encoding="utf-8") as f:
@@ -66,12 +98,10 @@ def transcribe():
                 text = segment["text"].strip()
                 f.write(f"[{start_time}] {text}\n\n")
 
-        # 6. Create secure links to our new backend routes
-        # We use urllib.parse.quote to safely handle spaces in file paths
+        # 5. Create secure links
         folder_link = f"/open_folder?path={quote(save_dir)}"
         file_link = f"/open_file?path={quote(output_filepath)}"
 
-        # 7. Return the success page with clickable buttons
         return f"""
         <!DOCTYPE html>
         <html>
@@ -91,7 +121,7 @@ def transcribe():
             
             <div style="margin-top: 30px;">
                 <a href="{folder_link}" class="btn">📁 Open Folder in Finder</a>
-                <a href="{file_link}" class="btn btn-secondary"> Open Text File</a>
+                <a href="{file_link}" class="btn btn-secondary">📄 Open Text File</a>
             </div>
 
             <br><br>
@@ -104,18 +134,16 @@ def transcribe():
         return f"Error during transcription: {str(e)}"
     
     finally:
-        # 8. Clean up the temporary audio file to save space
-        if os.path.exists(temp_filepath):
-            os.remove(temp_filepath)
+        # 6. Clean up temporary files
+        if actual_audio_path and os.path.exists(actual_audio_path):
+            os.remove(actual_audio_path)
 
-# --- NEW ROUTES TO OPEN FILES/FOLDERS USING MACOS NATIVE COMMANDS ---
-
+# --- ROUTES TO OPEN FILES/FOLDERS ---
 @app.route('/open_folder')
 def open_folder():
     path = request.args.get('path', '')
     path = os.path.expanduser(path)
     if os.path.isdir(path):
-        # 'open' is the macOS command to open Finder
         subprocess.Popen(['open', path])
     return f"Opening folder... <br><br><a href='/'>← Back to Home</a>"
 
@@ -124,14 +152,11 @@ def open_file():
     path = request.args.get('path', '')
     path = os.path.expanduser(path)
     if os.path.isfile(path):
-        # 'open' will open the file in your default text editor (TextEdit)
         subprocess.Popen(['open', path])
     return f"Opening file... <br><br><a href='/'>← Back to Home</a>"
 
 # --- HELPER FUNCTIONS ---
-
 def format_timestamp(seconds):
-    """Helper to make seconds look like 00:00:00"""
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
     secs = int(seconds % 60)
